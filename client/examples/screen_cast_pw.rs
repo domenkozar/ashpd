@@ -193,7 +193,7 @@ async fn start_streaming(node_id: u32, fd: OwnedFd) -> Result<(), pw::Error> {
     );
     let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(obj),
+        &pw::spa::pod::Variant::Object(obj),
     )
     .unwrap()
     .0

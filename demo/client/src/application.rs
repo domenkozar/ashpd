@@ -3,7 +3,7 @@ use std::{collections::HashMap, convert::TryFrom, str::FromStr};
 use adw::{prelude::*, subclass::prelude::*};
 use ashpd::{
     flatpak::{Flatpak, SpawnFlags, SpawnOptions},
-    zbus, zvariant,
+    wire, zbus,
 };
 use gtk::{
     gio,
@@ -140,20 +140,20 @@ impl Application {
                     "/{}",
                     config::APP_ID.split('.').collect::<Vec<_>>().join("/")
                 ))?
-                .interface("org.gtk.Actions")?
-                .destination(config::APP_ID)?
+                .interface("org.gtk.Actions")
+                .destination(config::APP_ID)
                 .build()
                 .await?;
             #[derive(Debug, serde::Serialize)]
             pub struct Params(
                 String,
-                Vec<zvariant::OwnedValue>,
-                HashMap<String, zvariant::OwnedValue>,
+                Vec<wire::OwnedVariant>,
+                HashMap<String, wire::OwnedVariant>,
             );
 
-            impl zvariant::DynamicType for Params {
-                fn signature(&self) -> zvariant::Signature {
-                    zvariant::Signature::from_str("(sava{sv})").unwrap()
+            impl wire::DynamicType for Params {
+                fn signature(&self) -> wire::Signature {
+                    wire::Signature::from_str("(sava{sv})").unwrap()
                 }
             }
 

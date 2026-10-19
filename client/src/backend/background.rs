@@ -9,8 +9,8 @@ use crate::{
     MaybeAppID, PortalError,
     backend::request::{Request, RequestImpl},
     desktop::{HandleToken, Response},
+    wire::{OwnedObjectPath, Type, as_variant},
     zbus::object_server::SignalEmitter,
-    zvariant::{OwnedObjectPath, Type, as_value},
 };
 
 #[derive(Serialize_repr, Deserialize_repr, Copy, Clone, PartialEq, Eq, Debug, Type)]
@@ -22,9 +22,9 @@ pub enum Activity {
 }
 
 #[derive(Debug, Serialize, Type)]
-#[zvariant(signature = "dict")]
+#[zbus(signature = "dict")]
 pub struct Background {
-    #[serde(with = "as_value")]
+    #[serde(with = "as_variant")]
     result: Activity,
 }
 
@@ -160,14 +160,14 @@ impl BackgroundInterface {
         app_id: MaybeAppID,
         enable: bool,
         commandline: Vec<String>,
-        flags: BitFlags<AutoStartFlags>,
+        flags: crate::flags::WireFlags<AutoStartFlags>,
     ) -> Result<bool, PortalError> {
         #[cfg(feature = "tracing")]
         tracing::debug!("Background::EnableAutostart");
 
         let response = self
             .imp
-            .enable_autostart(app_id, enable, commandline, flags)
+            .enable_autostart(app_id, enable, commandline, flags.0)
             .await;
 
         #[cfg(feature = "tracing")]

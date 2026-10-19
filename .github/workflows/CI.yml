@@ -70,6 +70,11 @@ jobs:
         with:
           command: test
           args: --workspace --features "gtk4,pipewire,wayland,raw_handle,tracing,backend,frontend"
+      - name: Test portal wire protocol with both runtimes
+        run: |
+          sudo dnf install -y dbus-daemon
+          dbus-run-session -- env ASHPD_TEST_PRIVATE_DBUS=1 cargo test -p ashpd --features settings,screencast,file_chooser --test portal_wire
+          dbus-run-session -- env ASHPD_TEST_PRIVATE_DBUS=1 cargo test -p ashpd --no-default-features --features async-io,settings,screencast,file_chooser --test portal_wire
 
   fmt:
     name: Rustfmt
