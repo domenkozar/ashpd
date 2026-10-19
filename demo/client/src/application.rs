@@ -171,7 +171,7 @@ impl Application {
                 .path(format!(
                     "/{}",
                     config::APP_ID.split('.').collect::<Vec<_>>().join("/")
-                ))?
+                ))
                 .interface("org.gtk.Actions")
                 .destination(config::APP_ID)
                 .build()
