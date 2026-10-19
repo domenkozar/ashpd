@@ -49,6 +49,17 @@ pub use self::window_identifier::WindowIdentifierType;
 #[allow(missing_docs)]
 /// Build your custom portals backend.
 pub mod backend;
+#[cfg(any(
+    test,
+    feature = "flatpak",
+    feature = "screencast",
+    feature = "screenshot",
+    feature = "remote_desktop",
+    feature = "dynamic_launcher",
+    feature = "input_capture",
+    all(feature = "backend", feature = "background"),
+))]
+mod flags;
 /// Spawn commands outside the sandbox or monitor if the running application has
 /// received an update & install it.
 #[cfg(feature = "flatpak")]
@@ -61,7 +72,7 @@ use std::sync::OnceLock;
 #[cfg_attr(docsrs, doc(cfg(feature = "backend")))]
 pub use async_trait;
 pub use enumflags2;
-pub use zbus::{self, zvariant};
+pub use zbus::{self, wire};
 
 /// Check whether the application is running inside a sandbox.
 ///
