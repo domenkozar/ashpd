@@ -1,4 +1,7 @@
-#![cfg(feature = "settings")]
+#![cfg(all(feature = "backend", feature = "settings"))]
+
+#[path = "portal_wire/backend.rs"]
+mod backend;
 
 use std::collections::HashMap;
 
@@ -6,65 +9,59 @@ use ashpd::desktop::settings::{APPEARANCE_NAMESPACE, ColorScheme, Settings};
 use futures_util::StreamExt;
 use zbus::{Connection, OwnedVariant, Variant};
 
-struct SettingsPortal;
+// The client speaks org.freedesktop.portal.*, while the backend implements
+// org.freedesktop.impl.portal.*. Forward only the protocol differences normally
+// handled by xdg-desktop-portal; all fixture data comes from ASHPD's backend.
+struct SettingsPortal(zbus::Proxy<'static>);
 
 #[zbus::interface(name = "org.freedesktop.portal.Settings")]
 impl SettingsPortal {
     #[zbus(property, name = "version")]
-    fn version(&self) -> u32 {
-        2
+    async fn version(&self) -> zbus::fdo::Result<u32> {
+        Ok(self.0.get_property("version").await?)
     }
 
-    fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedVariant> {
-        assert_eq!(namespace, APPEARANCE_NAMESPACE);
-        match key {
-            "color-scheme" => Ok(OwnedVariant::from(1_u32)),
-            // Older portal implementations returned an extra variant wrapper.
-            "nested" => Ok(Variant::Variant(Box::new(Variant::from(2_u32)))
-                .try_into()
-                .unwrap()),
-            _ => Err(zbus::fdo::Error::InvalidArgs("unknown setting".into())),
-        }
+    async fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedVariant> {
+        Ok(self.0.call("Read", &(namespace, key)).await?)
     }
 
-    fn read_all(&self, namespaces: Vec<String>) -> HashMap<String, HashMap<String, OwnedVariant>> {
-        assert_eq!(namespaces, [APPEARANCE_NAMESPACE]);
-        HashMap::from([(
-            APPEARANCE_NAMESPACE.into(),
-            HashMap::from([("color-scheme".into(), OwnedVariant::from(1_u32))]),
-        )])
+    async fn read_all(
+        &self,
+        namespaces: Vec<String>,
+    ) -> zbus::fdo::Result<HashMap<String, HashMap<String, OwnedVariant>>> {
+        Ok(self.0.call("ReadAll", &(namespaces,)).await?)
     }
 }
 
 #[cfg(feature = "screencast")]
-struct ScreencastPortal;
+struct ScreencastPortal(zbus::Proxy<'static>);
 
 #[cfg(feature = "screencast")]
 #[zbus::interface(name = "org.freedesktop.portal.ScreenCast")]
 impl ScreencastPortal {
     #[zbus(property, name = "version")]
-    fn version(&self) -> u32 {
-        2
+    async fn version(&self) -> zbus::fdo::Result<u32> {
+        Ok(self.0.get_property("version").await?)
     }
     #[zbus(property)]
-    fn available_source_types(&self) -> u32 {
-        3
+    async fn available_source_types(&self) -> zbus::fdo::Result<u32> {
+        Ok(self.0.get_property("AvailableSourceTypes").await?)
     }
     #[zbus(property)]
-    fn available_cursor_modes(&self) -> u32 {
-        7
+    async fn available_cursor_modes(&self) -> zbus::fdo::Result<u32> {
+        Ok(self.0.get_property("AvailableCursorModes").await?)
     }
 }
 
 #[cfg(feature = "file_chooser")]
-struct FileChooserPortal;
+struct FileChooserPortal(zbus::Proxy<'static>);
 
 #[cfg(feature = "file_chooser")]
 #[zbus::interface(name = "org.freedesktop.portal.FileChooser")]
 impl FileChooserPortal {
     #[zbus(property, name = "version")]
-    fn version(&self) -> u32 {
-        4
+    async fn version(&self) -> zbus::fdo::Result<u32> {
+        Ok(self.0.get_property("version").await?)
     }
 
     async fn open_file(
@@ -83,10 +80,10 @@ impl FileChooserPortal {
             "/org/freedesktop/portal/desktop/request/{}/{token}",
             sender.as_str().trim_start_matches(':').replace('.', "_")
         ))?;
-        let results = HashMap::from([(
-            "uris",
-            OwnedVariant::try_from(Variant::from(vec!["file:///tmp/fixture.txt".to_owned()]))?,
-        )]);
+        let (response, results): (u32, HashMap<String, OwnedVariant>) = self
+            .0
+            .call("OpenFile", &(&path, "", parent_window, title, options))
+            .await?;
         // Emit before returning: the request must already be subscribed.
         connection
             .emit_signal(
@@ -94,7 +91,7 @@ impl FileChooserPortal {
                 &path,
                 "org.freedesktop.portal.Request",
                 "Response",
-                &(0_u32, results),
+                &(response, results),
             )
             .await?;
         Ok(path)
@@ -108,22 +105,61 @@ async fn settings_wire_reads_properties_and_signals() {
         return;
     }
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let backend_connection = Connection::session().await.unwrap();
+        let builder = ashpd::backend::Builder::new(backend::NAME)
+            .unwrap()
+            .settings(backend::Fixture);
+        #[cfg(feature = "screencast")]
+        let builder = builder.screencast(backend::Fixture);
+        #[cfg(feature = "file_chooser")]
+        let builder = builder.file_chooser(backend::Fixture);
+        #[cfg(not(feature = "tokio"))]
+        let builder = builder.with_spawn(backend::Spawner);
+
+        let bus = zbus::fdo::DBusProxy::new(&backend_connection)
+            .await
+            .unwrap();
+        let mut owners = bus.receive_name_owner_changed().await.unwrap();
+        let task_connection = backend_connection.clone();
+        let backend_task = tokio::spawn(async move {
+            builder
+                .build_with_connection(task_connection)
+                .await
+                .unwrap();
+        });
+        // Builder requests its name only after registering every interface.
+        while let Some(owner) = owners.next().await {
+            if owner.args().unwrap().name().as_str() == backend::NAME {
+                break;
+            }
+        }
+        let settings_backend = backend_proxy(&backend_connection, "Settings").await;
+        let mut backend_changes = settings_backend
+            .receive_signal("SettingChanged")
+            .await
+            .unwrap();
         let server = zbus::connection::Builder::session()
             .name("org.freedesktop.portal.Desktop")
-            .serve_at("/org/freedesktop/portal/desktop", SettingsPortal)
+            .serve_at(backend::PATH, SettingsPortal(settings_backend.clone()))
             .build()
             .await
             .unwrap();
         #[cfg(feature = "screencast")]
         server
             .object_server()
-            .at("/org/freedesktop/portal/desktop", ScreencastPortal)
+            .at(
+                backend::PATH,
+                ScreencastPortal(backend_proxy(&backend_connection, "ScreenCast").await),
+            )
             .await
             .unwrap();
         #[cfg(feature = "file_chooser")]
         server
             .object_server()
-            .at("/org/freedesktop/portal/desktop", FileChooserPortal)
+            .at(
+                backend::PATH,
+                FileChooserPortal(backend_proxy(&backend_connection, "FileChooser").await),
+            )
             .await
             .unwrap();
         let client = Connection::session().await.unwrap();
@@ -163,6 +199,7 @@ async fn settings_wire_reads_properties_and_signals() {
             use ashpd::desktop::file_chooser::OpenFileRequest;
             let selected = OpenFileRequest::default()
                 .title("Choose a fixture")
+                .accept_label("Open fixture")
                 .connection(Some(client))
                 .send()
                 .await
@@ -179,13 +216,26 @@ async fn settings_wire_reads_properties_and_signals() {
             );
         }
         let mut changes = settings.receive_setting_changed().await.unwrap();
+        backend_connection
+            .emit_signal(
+                None::<&str>,
+                backend::PATH,
+                "org.freedesktop.impl.portal.Settings",
+                "SettingChanged",
+                &(APPEARANCE_NAMESPACE, "color-scheme", Variant::from(2_u32)),
+            )
+            .await
+            .unwrap();
+        let message = backend_changes.next().await.unwrap();
+        let message_body = message.body();
+        let body: (&str, &str, Variant<'_>) = message_body.deserialize().unwrap();
         server
             .emit_signal(
                 None::<&str>,
-                "/org/freedesktop/portal/desktop",
+                backend::PATH,
                 "org.freedesktop.portal.Settings",
                 "SettingChanged",
-                &(APPEARANCE_NAMESPACE, "color-scheme", Variant::from(2_u32)),
+                &body,
             )
             .await
             .unwrap();
@@ -193,7 +243,20 @@ async fn settings_wire_reads_properties_and_signals() {
         assert_eq!(setting.namespace(), APPEARANCE_NAMESPACE);
         assert_eq!(setting.key(), "color-scheme");
         assert_eq!(u32::try_from(setting.value()).unwrap(), 2);
+        backend_task.abort();
+        assert!(backend_task.await.unwrap_err().is_cancelled());
     })
     .await
     .expect("settings portal operations timed out");
+}
+
+async fn backend_proxy(connection: &Connection, interface: &str) -> zbus::Proxy<'static> {
+    zbus::Proxy::new_owned(
+        connection.clone(),
+        backend::NAME,
+        backend::PATH,
+        format!("org.freedesktop.impl.portal.{interface}"),
+    )
+    .await
+    .unwrap()
 }
